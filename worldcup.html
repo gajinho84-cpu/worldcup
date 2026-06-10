@@ -1,0 +1,471 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>🇰🇷 월드컵 스코어 예측</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.3.1/umd/react.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.3.1/umd/react-dom.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.5/babel.min.js"></script>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: #f0f7f0; font-family: 'Apple SD Gothic Neo', 'Malgun Gothic', sans-serif; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel">
+const { useState, useEffect, useCallback } = React;
+
+const API_URL = "https://script.google.com/macros/s/AKfycbwtec5M7_22hrzIVSYwvgvS9iKzK6-wbEAyKvEk-levXSvY-zdwj_09HTxvs1d5sy9QTg/exec";
+
+async function apiGetAll() {
+  const res  = await fetch(`${API_URL}?action=getBets`, { redirect: "follow" });
+  const json = await res.json();
+  const nested = {};
+  (json.bets || []).forEach(row => {
+    const [user, matchId, , home, away] = row;
+    if (!user || user === "user") return;
+    const mid = String(matchId);
+    if (!nested[user]) nested[user] = {};
+    if (!nested[user][mid]) nested[user][mid] = [];
+    nested[user][mid].push({ home: Number(home), away: Number(away) });
+  });
+  const resultMap = {};
+  (json.results || []).forEach(row => {
+    const [matchId, home, away] = row;
+    if (!matchId || matchId === "matchId") return;
+    resultMap[String(matchId)] = { home: Number(home), away: Number(away) };
+  });
+  return { bets: nested, results: resultMap };
+}
+
+async function apiSaveBets(user, matchId, bets) {
+  const url = `${API_URL}?action=saveBets&user=${encodeURIComponent(user)}&matchId=${matchId}&bets=${encodeURIComponent(JSON.stringify(bets))}`;
+  const res  = await fetch(url, { redirect: "follow" });
+  return res.json();
+}
+
+async function apiSaveResult(matchId, home, away) {
+  const url = `${API_URL}?action=saveResult&matchId=${matchId}&home=${home}&away=${away}`;
+  const res  = await fetch(url, { redirect: "follow" });
+  return res.json();
+}
+
+const MATCHES = [
+  { id: 1, group: "A조 1차전", home: "🇰🇷 대한민국", away: "🇨🇿 체코",    date: "2026-06-12 (금)", time: "오전 11:00", venue: "Estadio Akron, 과달라하라", kickoff: "2026-06-12T11:00:00+09:00", end: "2026-06-12T13:00:00+09:00" },
+  { id: 2, group: "A조 2차전", home: "🇲🇽 멕시코",   away: "🇰🇷 대한민국", date: "2026-06-19 (금)", time: "오전 10:00", venue: "Estadio Akron, 과달라하라", kickoff: "2026-06-19T10:00:00+09:00", end: "2026-06-19T12:00:00+09:00" },
+  { id: 3, group: "A조 3차전", home: "🇿🇦 남아공",   away: "🇰🇷 대한민국", date: "2026-06-25 (목)", time: "오전 10:00", venue: "Estadio BBVA, 몬테레이",    kickoff: "2026-06-25T10:00:00+09:00", end: "2026-06-25T12:00:00+09:00" },
+];
+
+const BET_AMOUNT         = 10000;
+const MAX_BETS_PER_MATCH = 3;
+const ADMIN_PASSWORD     = "admin1234";
+
+const won       = n  => n.toLocaleString("ko-KR") + "원";
+const isExact   = (b, r) => b.home === r.home && b.away === r.away;
+const sameScore = (a, b) => a.home === b.home && a.away === b.away;
+
+function isOpenForBetting(matchId, now) {
+  const idx = MATCHES.findIndex(m => m.id === matchId);
+  if (idx <= 0) return true;
+  return now >= new Date(MATCHES[idx - 1].end).getTime();
+}
+
+function ScoreInput({ value, onChange, disabled }) {
+  return (
+    <input type="number" min="0" max="30" value={value}
+      onChange={e => onChange(e.target.value === "" ? "" : Math.max(0, parseInt(e.target.value) || 0))}
+      disabled={disabled}
+      style={{ width:46, height:40, textAlign:"center", fontSize:20, fontWeight:700,
+        border:"2px solid #2d4a2d", borderRadius:8,
+        background: disabled ? "#eef4ee" : "#fff",
+        color:"#1a2e1a", outline:"none", fontFamily:"monospace" }} />
+  );
+}
+
+function MatchCard({ match, bets, onAddBet, onRemoveBet, result, isAdmin, onSetResult, now, saving }) {
+  const [home, setHome]       = useState("");
+  const [away, setAway]       = useState("");
+  const [resHome, setResHome] = useState(result?.home ?? "");
+  const [resAway, setResAway] = useState(result?.away ?? "");
+  const [err, setErr]         = useState("");
+
+  const closed     = now >= new Date(match.kickoff).getTime();
+  const open       = isOpenForBetting(match.id, now);
+  const locked     = !!result || closed;
+  const myBets     = bets || [];
+  const canAddMore = myBets.length < MAX_BETS_PER_MATCH && !locked && open;
+  const myIdx      = MATCHES.findIndex(x => x.id === match.id);
+  const prevMatch  = myIdx > 0 ? MATCHES[myIdx - 1] : null;
+  const prevName   = prevMatch ? `${prevMatch.home} vs ${prevMatch.away}` : "";
+  const prevEndLabel = prevMatch ? new Date(prevMatch.end).toLocaleString("ko-KR", { month:"long", day:"numeric", hour:"numeric", minute:"2-digit", hour12:true }) : "";
+  const myWin      = result && myBets.some(b => isExact(b, result));
+
+  const handleAdd = () => {
+    if (home === "" || away === "") { setErr("스코어를 입력하세요."); return; }
+    const newBet = { home: parseInt(home), away: parseInt(away) };
+    if (myBets.some(b => sameScore(b, newBet))) { setErr("이미 같은 스코어에 베팅했습니다."); return; }
+    onAddBet(match.id, newBet);
+    setHome(""); setAway(""); setErr("");
+  };
+
+  return (
+    <div style={{ background: myBets.length ? "#fff" : "#fafafa", border:`2px solid ${myBets.length ? "#2d4a2d" : "#d0d0d0"}`, borderRadius:14, padding:"16px 18px", marginBottom:12, boxShadow: myBets.length ? "3px 3px 0 #2d4a2d" : "none", opacity: saving ? 0.7 : 1 }}>
+      <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:6 }}>
+        <span style={{ fontSize:11, fontWeight:700, letterSpacing:2, color: myBets.length ? "#4caf50" : "#aaa" }}>{match.group}</span>
+        <div style={{ display:"flex", gap:6, alignItems:"center" }}>
+          {saving && <span style={{ fontSize:11, color:"#888" }}>저장 중...</span>}
+          {!open && !result && <span style={{ fontSize:11, background:"#eceff1", color:"#607d8b", borderRadius:10, padding:"2px 8px", fontWeight:700 }}>⏳ 대기</span>}
+          {open && closed && !result && <span style={{ fontSize:11, background:"#fce4ec", color:"#c62828", borderRadius:10, padding:"2px 8px", fontWeight:700 }}>🔒 마감</span>}
+          <span style={{ fontSize:11, color:"#888" }}>{match.date} {match.time}</span>
+        </div>
+      </div>
+      <div style={{ fontSize:10, color:"#aaa", textAlign:"right", marginBottom:8 }}>📍 {match.venue}</div>
+      <div style={{ display:"flex", alignItems:"center", justifyContent:"center", gap:10, marginBottom:12 }}>
+        <span style={{ fontSize:15, fontWeight:700 }}>{match.home}</span>
+        <span style={{ fontSize:13, color:"#aaa" }}>vs</span>
+        <span style={{ fontSize:15, fontWeight:700 }}>{match.away}</span>
+      </div>
+
+      {myBets.length > 0 && (
+        <div style={{ marginBottom:12 }}>
+          {myBets.map((b, i) => {
+            const win = result && isExact(b, result);
+            return (
+              <div key={i} style={{ display:"flex", alignItems:"center", justifyContent:"space-between", background: win ? "#c8e6c9" : "#f1f7f1", borderRadius:8, padding:"8px 12px", marginBottom:6 }}>
+                <span style={{ fontSize:12, color:"#666" }}>베팅 {i+1} · {won(BET_AMOUNT)}</span>
+                <span style={{ fontFamily:"monospace", fontWeight:700, fontSize:17, color: win ? "#2e7d32" : "#1a2e1a" }}>{b.home} : {b.away}{win && " 🎯"}</span>
+                {!locked ? <button onClick={() => onRemoveBet(match.id, i)} style={{ background:"none", border:"1px solid #e57373", color:"#c62828", borderRadius:6, padding:"2px 10px", fontSize:12, fontWeight:700, cursor:"pointer" }}>삭제</button> : <span style={{ width:40 }} />}
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      {!open && !locked && (
+        <div style={{ textAlign:"center", fontSize:12, color:"#607d8b", background:"#eceff1", borderRadius:8, padding:"10px 12px" }}>
+          ⏳ 직전 경기({prevName}) 종료 후 베팅이 열립니다
+          <div style={{ fontSize:11, color:"#90a4ae", marginTop:2 }}>오픈 예정: {prevEndLabel}</div>
+        </div>
+      )}
+
+      {!locked && open && canAddMore && (
+        <div>
+          <div style={{ display:"flex", alignItems:"center", justifyContent:"center", gap:8 }}>
+            <ScoreInput value={home} onChange={setHome} disabled={false} />
+            <span style={{ fontSize:18, fontWeight:700, color:"#2d4a2d" }}>:</span>
+            <ScoreInput value={away} onChange={setAway} disabled={false} />
+            <button onClick={handleAdd} style={{ background:"#2d4a2d", color:"#fff", border:"none", borderRadius:8, padding:"8px 18px", fontWeight:700, fontSize:13, cursor:"pointer" }}>+ 베팅 추가</button>
+          </div>
+          <div style={{ textAlign:"center", fontSize:11, color: err ? "#c62828" : "#aaa", marginTop:6 }}>
+            {err || `남은 베팅 ${MAX_BETS_PER_MATCH - myBets.length}회 · 서로 다른 스코어만 가능`}
+          </div>
+        </div>
+      )}
+
+      {!locked && open && !canAddMore && myBets.length >= MAX_BETS_PER_MATCH && (
+        <div style={{ textAlign:"center", fontSize:12, color:"#888", padding:"4px 0" }}>이 경기 최대 베팅({MAX_BETS_PER_MATCH}회) 완료 · 합계 {won(myBets.length * BET_AMOUNT)}</div>
+      )}
+
+      {closed && !result && (
+        <div style={{ textAlign:"center", fontSize:12, color:"#888", padding:"6px 0" }}>🔒 경기 시작으로 베팅 마감{myBets.length ? ` · 내 베팅 ${myBets.length}건 확정` : " · 미참여"}</div>
+      )}
+
+      {result && (
+        <div style={{ marginTop:8, padding:"8px 12px", borderRadius:8, background: myWin ? "#e8f5e9" : myBets.length ? "#fce4ec" : "#f5f5f5", display:"flex", justifyContent:"space-between", alignItems:"center" }}>
+          <span style={{ fontSize:12, color:"#555" }}>최종 결과: <strong>{result.home} : {result.away}</strong></span>
+          {myBets.length > 0 && <span style={{ fontWeight:700, fontSize:13, color: myWin ? "#2e7d32" : "#c62828" }}>{myWin ? "🎯 적중!" : "❌ 미적중"}</span>}
+        </div>
+      )}
+
+      {isAdmin && !result && (
+        <div style={{ marginTop:12, borderTop:"1px dashed #ccc", paddingTop:10 }}>
+          <div style={{ fontSize:11, color:"#888", marginBottom:6 }}>🔑 관리자 · 실제 결과 입력</div>
+          <div style={{ display:"flex", gap:6, alignItems:"center" }}>
+            <ScoreInput value={resHome} onChange={setResHome} disabled={false} />
+            <span style={{ fontWeight:700 }}>:</span>
+            <ScoreInput value={resAway} onChange={setResAway} disabled={false} />
+            <button onClick={() => { if(resHome===""||resAway==="") return; onSetResult(match.id,{home:parseInt(resHome),away:parseInt(resAway)}); }} style={{ background:"#e65100", color:"#fff", border:"none", borderRadius:7, padding:"6px 14px", fontWeight:700, fontSize:12, cursor:"pointer" }}>결과 등록</button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function settle(allPredictions, results) {
+  const users = Object.keys(allPredictions);
+  const winnings = {};
+  users.forEach(u => winnings[u] = 0);
+  const matchInfo = [];
+  let carryover = 0;
+  MATCHES.forEach(m => {
+    let betCount = 0; const bettors = [];
+    users.forEach(u => { const arr = allPredictions[u]?.[m.id]||[]; if(arr.length){betCount+=arr.length;bettors.push(u);} });
+    const pool = betCount * BET_AMOUNT + carryover;
+    const r = results[m.id];
+    if (!r) { matchInfo.push({ match:m, settled:false, betCount, bettorCount:bettors.length, carryIn:carryover, pool }); return; }
+    const winners = bettors.filter(u => (allPredictions[u][m.id]||[]).some(b => isExact(b,r)));
+    let perWinner=0, nextCarry=0;
+    if (winners.length > 0) { perWinner=Math.floor(pool/winners.length); winners.forEach(u=>winnings[u]+=perWinner); nextCarry=pool-perWinner*winners.length; }
+    else { nextCarry=pool; }
+    matchInfo.push({ match:m, settled:true, betCount, bettorCount:bettors.length, carryIn:carryover, pool, winners, perWinner, nextCarry });
+    carryover = nextCarry;
+  });
+  return { winnings, matchInfo, finalCarry:carryover };
+}
+
+function Leaderboard({ allPredictions, results }) {
+  const users = Object.keys(allPredictions);
+  if (!users.length) return <div style={{ textAlign:"center", padding:40, color:"#888" }}>아직 참가자가 없습니다.</div>;
+  const betsOf = u => MATCHES.reduce((s,m) => s+(allPredictions[u]?.[m.id]?.length||0), 0);
+  const { winnings, matchInfo, finalCarry } = settle(allPredictions, results);
+  const totalPool = users.reduce((s,u) => s+betsOf(u)*BET_AMOUNT, 0);
+  const hasResults = Object.keys(results).length > 0;
+  const ranking = users.map(u => { const paid=betsOf(u)*BET_AMOUNT; return { user:u, bets:betsOf(u), paid, win:winnings[u], net:winnings[u]-paid }; }).sort((a,b) => b.win-a.win||b.net-a.net);
+  return (
+    <div>
+      <div style={{ background:"#2d4a2d", color:"#fff", borderRadius:12, padding:"14px 18px", marginBottom:14, display:"flex", justifyContent:"space-between", alignItems:"center" }}>
+        <div><div style={{ fontSize:11, color:"#81c784" }}>총 상금 풀</div><div style={{ fontSize:24, fontWeight:900 }}>{won(totalPool)}</div></div>
+        <div style={{ textAlign:"right" }}><div style={{ fontSize:11, color:"#81c784" }}>참가자</div><div style={{ fontSize:20, fontWeight:700 }}>{users.length}명</div></div>
+      </div>
+      <div style={{ fontSize:13, fontWeight:700, color:"#2d4a2d", marginBottom:8 }}>📋 경기별 정산</div>
+      {matchInfo.map(mi => (
+        <div key={mi.match.id} style={{ background:"#fff", border:"1px solid #e0e0e0", borderRadius:10, padding:"10px 14px", marginBottom:8, fontSize:12 }}>
+          <div style={{ display:"flex", justifyContent:"space-between", marginBottom:4 }}>
+            <span style={{ fontWeight:700 }}>{mi.match.home} vs {mi.match.away}</span>
+            <span style={{ color:"#888" }}>{mi.bettorCount}명 · {mi.betCount}베팅</span>
+          </div>
+          {!mi.settled ? <div style={{ color:"#aaa" }}>대기 중 · 예상 상금 {won(mi.pool)}{mi.carryIn>0&&` (이월 ${won(mi.carryIn)} 포함)`}</div>
+            : mi.winners.length > 0 ? <div style={{ color:"#2e7d32" }}>🎯 당첨 {mi.winners.length}명 · {won(mi.pool)}{mi.carryIn>0&&<span style={{ color:"#f57f17" }}> (이월 {won(mi.carryIn)} 포함)</span>}<br/><strong>→ {mi.winners.join(", ")} 각 {won(mi.perWinner)}</strong></div>
+            : <div style={{ color:"#c62828" }}>❌ 당첨자 없음 · {won(mi.pool)} 전액 다음 경기로 이월</div>}
+        </div>
+      ))}
+      {finalCarry > 0 && <div style={{ background:"#fff3e0", border:"1px solid #ffb74d", borderRadius:10, padding:"10px 14px", fontSize:12, color:"#e65100", fontWeight:700, marginBottom:8 }}>⚠️ 잔여 이월금 {won(finalCarry)} — 분배 방법 팀에서 협의하세요.</div>}
+      <div style={{ fontSize:13, fontWeight:700, color:"#2d4a2d", margin:"12px 0 8px" }}>🏆 상금 순위</div>
+      {ranking.map((s,i) => (
+        <div key={s.user} style={{ display:"flex", alignItems:"center", gap:10, padding:"12px 14px", marginBottom:8, background: i===0&&s.win>0?"#fffde7":"#fff", border:`2px solid ${i===0&&s.win>0?"#f9a825":"#e0e0e0"}`, borderRadius:10 }}>
+          <span style={{ fontSize:20, width:28 }}>{s.win>0&&i<3?["🥇","🥈","🥉"][i]:`${i+1}.`}</span>
+          <div style={{ flex:1 }}><div style={{ fontWeight:700, fontSize:15 }}>{s.user}</div><div style={{ fontSize:11, color:"#888" }}>{s.bets}베팅 · 납부 {won(s.paid)}</div></div>
+          <div style={{ textAlign:"right" }}>
+            <div style={{ fontFamily:"monospace", fontWeight:700, fontSize:18, color:"#2d4a2d" }}>{won(s.win)}</div>
+            {hasResults && <div style={{ fontSize:11, fontWeight:700, color: s.net>=0?"#2e7d32":"#c62828" }}>{s.net>=0?"+":""}{won(s.net)}</div>}
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function BetMatrix({ allPredictions, results, now }) {
+  const users = Object.keys(allPredictions);
+  if (!users.length) return <div style={{ textAlign:"center", padding:40, color:"#888" }}>아직 베팅한 참가자가 없습니다.</div>;
+  const betsOf  = u => MATCHES.reduce((s,m) => s+(allPredictions[u]?.[m.id]?.length||0), 0);
+  const sorted  = [...users].sort((a,b) => betsOf(b)-betsOf(a)||a.localeCompare(b,"ko"));
+  const closedOf = m => now >= new Date(m.kickoff).getTime();
+  const cell = (user, m) => {
+    const arr = allPredictions[user]?.[m.id]||[];
+    if (!arr.length) return <span style={{ color:"#ddd" }}>—</span>;
+    if (!closedOf(m)) return <span>💰<span style={{ fontSize:11, color:"#888" }}>×{arr.length}</span></span>;
+    const r = results[m.id];
+    return <div style={{ display:"flex", flexDirection:"column", gap:2 }}>{arr.map((b,i) => { const win=r&&isExact(b,r); return <span key={i} style={{ fontFamily:"monospace", fontWeight:700, fontSize:12, color:win?"#2e7d32":"#1a2e1a", background:win?"#c8e6c9":"transparent", borderRadius:4, padding:win?"1px 4px":0 }}>{b.home}:{b.away}{win&&" 🎯"}</span>; })}</div>;
+  };
+  return (
+    <div>
+      <div style={{ background:"#fff", border:"1px solid #e0e0e0", borderRadius:10, padding:"10px 14px", marginBottom:12, fontSize:12, color:"#666" }}>💰×N = 베팅 건수(비공개) · 경기 시작 후 스코어 공개 · 🎯 = 적중</div>
+      <div style={{ overflowX:"auto", border:"2px solid #2d4a2d", borderRadius:12 }}>
+        <table style={{ borderCollapse:"collapse", width:"100%", background:"#fff" }}>
+          <thead>
+            <tr style={{ background:"#2d4a2d", color:"#fff" }}>
+              <th style={{ padding:"10px 12px", textAlign:"left", fontSize:12, minWidth:84 }}>참가자</th>
+              {MATCHES.map(m => <th key={m.id} style={{ padding:"8px 6px", fontSize:10, minWidth:80, borderLeft:"1px solid #3d5a3d" }}><div>{m.home}</div><div style={{ color:"#81c784", fontSize:9 }}>vs</div><div>{m.away}</div>{closedOf(m)&&<div style={{ fontSize:9, color:"#ffcc80", marginTop:2 }}>🔒공개</div>}</th>)}
+              <th style={{ padding:"8px 6px", fontSize:10, minWidth:58, borderLeft:"1px solid #3d5a3d" }}>납부액</th>
+            </tr>
+          </thead>
+          <tbody>
+            {sorted.map((user,ri) => (
+              <tr key={user} style={{ background: ri%2?"#f7faf7":"#fff" }}>
+                <td style={{ padding:"10px 12px", fontWeight:700, fontSize:13, borderRight:"1px solid #eee" }}>{user}</td>
+                {MATCHES.map(m => <td key={m.id} style={{ padding:"8px 6px", textAlign:"center", borderLeft:"1px solid #f0f0f0" }}>{cell(user,m)}</td>)}
+                <td style={{ padding:"8px 6px", textAlign:"center", fontSize:12, fontWeight:700, color:"#2d4a2d", borderLeft:"1px solid #f0f0f0" }}>{won(betsOf(user)*BET_AMOUNT)}</td>
+              </tr>
+            ))}
+          </tbody>
+          <tfoot>
+            <tr style={{ background:"#e8f5e9" }}>
+              <td style={{ padding:"10px 12px", fontSize:12, fontWeight:700, color:"#2e7d32" }}>경기별 베팅</td>
+              {MATCHES.map(m => { const n=sorted.reduce((s,u)=>s+(allPredictions[u]?.[m.id]?.length||0),0); return <td key={m.id} style={{ padding:"10px 6px", textAlign:"center", fontSize:12, fontWeight:700, color:"#2e7d32", borderLeft:"1px solid #c8e6c9" }}>{n}건</td>; })}
+              <td style={{ padding:"10px 6px", textAlign:"center", fontSize:12, fontWeight:700, color:"#2e7d32", borderLeft:"1px solid #c8e6c9" }}>{won(sorted.reduce((s,u)=>s+betsOf(u),0)*BET_AMOUNT)}</td>
+            </tr>
+          </tfoot>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+function App() {
+  const [tab, setTab]               = useState("predict");
+  const [name, setName]             = useState("");
+  const [inputName, setInputName]   = useState("");
+  const [allPredictions, setAllPredictions] = useState({});
+  const [results, setResults]       = useState({});
+  const [isAdmin, setIsAdmin]       = useState(false);
+  const [adminInput, setAdminInput] = useState("");
+  const [adminMode, setAdminMode]   = useState(false);
+  const [now, setNow]               = useState(Date.now());
+  const [loading, setLoading]       = useState(true);
+  const [saving, setSaving]         = useState(false);
+  const [error, setError]           = useState("");
+
+  useEffect(() => { const t=setInterval(()=>setNow(Date.now()),1000); return ()=>clearInterval(t); }, []);
+  useEffect(() => { try { if(sessionStorage.getItem("wc_admin")) setIsAdmin(true); } catch {} }, []);
+
+  const loadData = useCallback(async () => {
+    try {
+      const data = await apiGetAll();
+      setAllPredictions(data.bets || {});
+      setResults(data.results || {});
+      setError("");
+    } catch(e) {
+      setError("데이터를 불러오지 못했습니다.");
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => { loadData(); const t=setInterval(loadData,30000); return ()=>clearInterval(t); }, [loadData]);
+
+  const predictions = name ? (allPredictions[name]||{}) : {};
+  const isClosed = matchId => { const m=MATCHES.find(x=>x.id===matchId); return m ? now>=new Date(m.kickoff).getTime() : false; };
+
+  const handleAddBet = async (matchId, bet) => {
+    if (!name||isClosed(matchId)||results[matchId]) return;
+    if (!isOpenForBetting(matchId,now)) return;
+    const arr = predictions[matchId]||[];
+    if (arr.length>=MAX_BETS_PER_MATCH||arr.some(b=>sameScore(b,bet))) return;
+    const newBets = [...arr, bet];
+    setAllPredictions(prev => ({ ...prev, [name]: { ...prev[name], [matchId]: newBets } }));
+    setSaving(true);
+    try { await apiSaveBets(name, matchId, newBets); }
+    catch { setError("저장 실패."); await loadData(); }
+    finally { setSaving(false); }
+  };
+
+  const handleRemoveBet = async (matchId, idx) => {
+    if (!name||isClosed(matchId)||results[matchId]) return;
+    const arr = [...(predictions[matchId]||[])];
+    arr.splice(idx,1);
+    setAllPredictions(prev => { const next={...prev,[name]:{...(prev[name]||{})}}; if(arr.length) next[name][matchId]=arr; else delete next[name][matchId]; return next; });
+    setSaving(true);
+    try { await apiSaveBets(name, matchId, arr); }
+    catch { setError("저장 실패."); await loadData(); }
+    finally { setSaving(false); }
+  };
+
+  const handleSetResult = async (matchId, score) => {
+    setResults(prev => ({ ...prev, [matchId]: score }));
+    try { await apiSaveResult(matchId, score.home, score.away); }
+    catch { setError("결과 저장 실패."); await loadData(); }
+  };
+
+  const handleAdminLogin = () => {
+    if (adminInput===ADMIN_PASSWORD) { setIsAdmin(true); try{sessionStorage.setItem("wc_admin","1");}catch{} setAdminMode(false); }
+    else alert("비밀번호가 틀렸습니다.");
+  };
+
+  const myTotalBets = Object.values(predictions).reduce((s,arr)=>s+arr.length,0);
+
+  if (loading) return (
+    <div style={{ minHeight:"100vh", background:"#f0f7f0", display:"flex", flexDirection:"column", alignItems:"center", justifyContent:"center", gap:12 }}>
+      <div style={{ fontSize:32 }}>⚽</div>
+      <div style={{ fontSize:16, color:"#2d4a2d", fontWeight:700 }}>데이터 불러오는 중...</div>
+    </div>
+  );
+
+  return (
+    <div style={{ minHeight:"100vh", background:"#f0f7f0" }}>
+      <div style={{ background:"#2d4a2d", color:"#fff", padding:"20px 20px 0", textAlign:"center" }}>
+        <div style={{ fontSize:11, letterSpacing:3, color:"#81c784", fontWeight:700, marginBottom:4 }}>FIFA WORLD CUP 2026</div>
+        <div style={{ fontSize:26, fontWeight:900, letterSpacing:-1 }}>🇰🇷 대한민국 스코어 예측</div>
+        <div style={{ fontSize:12, color:"#a5d6a7", marginTop:2 }}>A조 3경기 · 베팅 1건 {won(BET_AMOUNT)} · 한 경기 최대 {MAX_BETS_PER_MATCH}건</div>
+        <div style={{ display:"flex", marginTop:16 }}>
+          {[{id:"predict",label:"⚽ 예측"},{id:"bets",label:"📋 베팅현황"},{id:"board",label:"🏆 순위·상금"}].map(t => (
+            <button key={t.id} onClick={()=>setTab(t.id)} style={{ flex:1, padding:"10px 0", background:tab===t.id?"#fff":"transparent", color:tab===t.id?"#2d4a2d":"#a5d6a7", border:"none", fontWeight:700, fontSize:13, borderRadius:"8px 8px 0 0", cursor:"pointer" }}>{t.label}</button>
+          ))}
+        </div>
+      </div>
+
+      <div style={{ maxWidth:520, margin:"0 auto", padding:"20px 16px" }}>
+        {error && (
+          <div style={{ background:"#fce4ec", border:"1px solid #e57373", borderRadius:10, padding:"10px 14px", marginBottom:14, fontSize:12, color:"#c62828", display:"flex", justifyContent:"space-between" }}>
+            ⚠️ {error}
+            <button onClick={()=>{setError("");loadData();}} style={{ background:"none", border:"none", color:"#c62828", fontWeight:700, cursor:"pointer" }}>다시 시도</button>
+          </div>
+        )}
+        <div style={{ textAlign:"right", fontSize:10, color:"#bbb", marginBottom:8 }}>
+          🔄 30초마다 자동 갱신 · <button onClick={loadData} style={{ background:"none", border:"none", color:"#4caf50", fontSize:10, cursor:"pointer", fontWeight:700, padding:0 }}>지금 갱신</button>
+        </div>
+
+        {tab === "predict" && (
+          <>
+            {!name ? (
+              <div style={{ background:"#fff", border:"2px solid #2d4a2d", borderRadius:14, padding:24, marginBottom:20, textAlign:"center", boxShadow:"3px 3px 0 #2d4a2d" }}>
+                <div style={{ fontSize:16, fontWeight:700, marginBottom:6 }}>참가자 이름을 입력하세요</div>
+                <div style={{ fontSize:12, color:"#888", marginBottom:14 }}>경기마다 서로 다른 스코어 최대 {MAX_BETS_PER_MATCH}개 베팅 · 1건 {won(BET_AMOUNT)}<br/>⏰ 베팅·수정은 각 경기 시작 전까지<br/>🔓 다음 경기는 직전 경기 종료 후 열림</div>
+                <div style={{ display:"flex", gap:8 }}>
+                  <input value={inputName} onChange={e=>setInputName(e.target.value)} onKeyDown={e=>e.key==="Enter"&&inputName.trim()&&setName(inputName.trim())} placeholder="예: 김철수" style={{ flex:1, padding:"10px 14px", fontSize:15, border:"2px solid #2d4a2d", borderRadius:8, outline:"none" }} />
+                  <button onClick={()=>inputName.trim()&&setName(inputName.trim())} style={{ background:"#2d4a2d", color:"#fff", border:"none", borderRadius:8, padding:"10px 18px", fontWeight:700, fontSize:14, cursor:"pointer" }}>시작</button>
+                </div>
+              </div>
+            ) : (
+              <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", background:"#e8f5e9", borderRadius:10, padding:"10px 16px", marginBottom:14 }}>
+                <span style={{ fontWeight:700, color:"#2e7d32" }}>👤 {name}</span>
+                <div style={{ display:"flex", alignItems:"center", gap:12 }}>
+                  <span style={{ fontSize:12, color:"#555" }}>총 {myTotalBets}베팅 · {won(myTotalBets*BET_AMOUNT)}</span>
+                  <button onClick={()=>setName("")} style={{ background:"none", border:"1px solid #aaa", borderRadius:6, padding:"3px 10px", fontSize:12, cursor:"pointer", color:"#555" }}>변경</button>
+                </div>
+              </div>
+            )}
+            {MATCHES.map(m => <MatchCard key={m.id} match={m} bets={predictions[m.id]} onAddBet={handleAddBet} onRemoveBet={handleRemoveBet} result={results[m.id]} isAdmin={isAdmin} onSetResult={handleSetResult} now={now} saving={saving} />)}
+            <div style={{ textAlign:"center", marginTop:24 }}>
+              {!isAdmin ? (!adminMode
+                ? <button onClick={()=>setAdminMode(true)} style={{ background:"none", border:"none", color:"#bbb", fontSize:11, cursor:"pointer", textDecoration:"underline" }}>관리자 로그인</button>
+                : <div style={{ display:"flex", gap:8, justifyContent:"center" }}>
+                    <input type="password" value={adminInput} onChange={e=>setAdminInput(e.target.value)} onKeyDown={e=>e.key==="Enter"&&handleAdminLogin()} placeholder="관리자 비밀번호" style={{ padding:"6px 12px", border:"1px solid #ccc", borderRadius:7, fontSize:13, outline:"none" }} />
+                    <button onClick={handleAdminLogin} style={{ background:"#e65100", color:"#fff", border:"none", borderRadius:7, padding:"6px 14px", fontSize:13, fontWeight:700, cursor:"pointer" }}>확인</button>
+                  </div>
+              ) : <div style={{ fontSize:12, color:"#e65100", fontWeight:700 }}>🔑 관리자 모드 <button onClick={()=>{setIsAdmin(false);try{sessionStorage.removeItem("wc_admin");}catch{}}} style={{ marginLeft:8, background:"none", border:"none", color:"#aaa", fontSize:11, cursor:"pointer", textDecoration:"underline" }}>로그아웃</button></div>}
+            </div>
+          </>
+        )}
+
+        {tab === "bets" && (
+          <div>
+            <div style={{ background:"#2d4a2d", color:"#fff", borderRadius:14, padding:"16px 20px", marginBottom:16, textAlign:"center" }}>
+              <div style={{ fontSize:11, letterSpacing:2, color:"#81c784" }}>ALL BETS</div>
+              <div style={{ fontSize:22, fontWeight:900 }}>📋 전체 베팅 현황</div>
+            </div>
+            <BetMatrix allPredictions={allPredictions} results={results} now={now} />
+          </div>
+        )}
+
+        {tab === "board" && (
+          <div>
+            <div style={{ background:"#2d4a2d", color:"#fff", borderRadius:14, padding:"16px 20px", marginBottom:16, textAlign:"center" }}>
+              <div style={{ fontSize:11, letterSpacing:2, color:"#81c784" }}>LEADERBOARD</div>
+              <div style={{ fontSize:22, fontWeight:900 }}>🏆 참가자 순위</div>
+            </div>
+            <Leaderboard allPredictions={allPredictions} results={results} />
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<App />);
+</script>
+</body>
+</html>
