@@ -60,6 +60,7 @@ const MATCHES = [
 
 const BET_AMOUNT         = 10000;
 const MAX_BETS_PER_MATCH = 3;
+const MAX_SAME_SCORE     = 3; // 같은 경기·같은 스코어 최대 인원
 const ADMIN_PASSWORD     = "admin1234";
 
 const won       = n  => n.toLocaleString("ko-KR") + "원";
@@ -84,7 +85,7 @@ function ScoreInput({ value, onChange, disabled }) {
   );
 }
 
-function MatchCard({ match, bets, onAddBet, onRemoveBet, result, isAdmin, onSetResult, now, saving }) {
+function MatchCard({ match, bets, onAddBet, onRemoveBet, result, isAdmin, onSetResult, now, saving, allPredictions }) {
   const [home, setHome]       = useState("");
   const [away, setAway]       = useState("");
   const [resHome, setResHome] = useState(result?.home ?? "");
@@ -106,6 +107,9 @@ function MatchCard({ match, bets, onAddBet, onRemoveBet, result, isAdmin, onSetR
     if (home === "" || away === "") { setErr("스코어를 입력하세요."); return; }
     const newBet = { home: parseInt(home), away: parseInt(away) };
     if (myBets.some(b => sameScore(b, newBet))) { setErr("이미 같은 스코어에 베팅했습니다."); return; }
+    // 같은 스코어 인원 초과 체크
+    const sameCount = Object.values(allPredictions).filter(up => (up[match.id]||[]).some(b=>sameScore(b,newBet))).length;
+    if (sameCount >= MAX_SAME_SCORE) { setErr(`이 스코어(${newBet.home}:${newBet.away})는 이미 ${MAX_SAME_SCORE}명이 선택했습니다.`); return; }
     onAddBet(match.id, newBet);
     setHome(""); setAway(""); setErr("");
   };
@@ -344,6 +348,15 @@ function App() {
     if (!isOpenForBetting(matchId,now)) return;
     const arr = predictions[matchId]||[];
     if (arr.length>=MAX_BETS_PER_MATCH||arr.some(b=>sameScore(b,bet))) return;
+
+    // 같은 경기·같은 스코어를 선택한 다른 참가자 수 확인
+    const sameScoreCount = Object.values(allPredictions).filter(userPreds =>
+      (userPreds[matchId] || []).some(b => sameScore(b, bet))
+    ).length;
+    if (sameScoreCount >= MAX_SAME_SCORE) {
+      alert(`이 스코어(${bet.home}:${bet.away})는 이미 ${MAX_SAME_SCORE}명이 선택했습니다. 다른 스코어를 선택해주세요.`);
+      return;
+    }
     const newBets = [...arr, bet];
     setAllPredictions(prev => ({ ...prev, [name]: { ...prev[name], [matchId]: newBets } }));
     setSaving(true);
@@ -427,7 +440,7 @@ function App() {
                 </div>
               </div>
             )}
-            {MATCHES.map(m => <MatchCard key={m.id} match={m} bets={predictions[m.id]} onAddBet={handleAddBet} onRemoveBet={handleRemoveBet} result={results[m.id]} isAdmin={isAdmin} onSetResult={handleSetResult} now={now} saving={saving} />)}
+            {MATCHES.map(m => <MatchCard key={m.id} match={m} bets={predictions[m.id]} onAddBet={handleAddBet} onRemoveBet={handleRemoveBet} result={results[m.id]} isAdmin={isAdmin} onSetResult={handleSetResult} now={now} saving={saving} allPredictions={allPredictions} />)}
             <div style={{ textAlign:"center", marginTop:24 }}>
               {!isAdmin ? (!adminMode
                 ? <button onClick={()=>setAdminMode(true)} style={{ background:"none", border:"none", color:"#bbb", fontSize:11, cursor:"pointer", textDecoration:"underline" }}>관리자 로그인</button>
@@ -468,3 +481,4 @@ ReactDOM.createRoot(document.getElementById("root")).render(<App />);
 </script>
 </body>
 </html>
+
